@@ -1,4 +1,4 @@
-# Dormitory Settlement Manager
+# kpi_settlement_reports
 
 Автоматизована система розподілу студентів по гуртожитках на основі рейтингових балів у Студмістечко КПІ ім. Ігоря Сікорського (https://settlement.kpi.ua/ratings), пріоритетів та гендерних квот. Скрипт отримує дані з API, проводить симуляцію розселення та генерує детальний Excel-звіт із графіками, статистикою та кольоровою розміткою вкладок.
 
@@ -20,8 +20,8 @@
 
 1. Склонуй репозиторій:
 ```bash
-git clone [https://github.com/YSeragus/dorm-settlement-manager.git](https://github.com/YSeragus/dorm-settlement-manager.git)
-cd dorm-settlement-manager
+git clone [https://github.com/YSeragus/kpi_settlement_reports.git](https://github.com/YSeragus/kpi_settlement_reports.git)
+cd kpi_settlement_reports
 ```
 
 2. Встанови необхідні залежності. Для роботи скрипта потрібні requests, pandas та xlsxwriter:
