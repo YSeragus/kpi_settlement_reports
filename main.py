@@ -435,23 +435,25 @@ def get_api_data(api_url):
     return pd.DataFrame(response.json()['rows'])
 
 def allocate_dorms(df, capacities):
-    df = df.dropna(subset=['rating'])
-    df = df.sort_values(by='rating', ascending=False).reset_index(drop=True)
+    # 1. Отбрасываем тех, у кого нет рейтинга
+    valid_df = df.dropna(subset=['rating']).copy()
     
-    managers = {dorm: DormManager(dorm, caps['male'], caps['female'], caps['unisex']) 
-                for dorm, caps in capacities.items()}
-                
-    unallocated = []     
-    denied_students = [] 
+    # Сортируем глобально по рейтингу в самом начале. 
+    # Это нужно для тай-брейка: если у двух студентов ОДИНАКОВЫЙ локальный балл в одно общежитие, 
+    # победит тот, у кого был выше глобальный балл.
+    valid_df = valid_df.sort_values(by='rating', ascending=False).reset_index(drop=True)
     
-    for index, student in df.iterrows():
+    unassigned_queue = []
+    denied_students = []
+    
+    # Формируем очередь студентов
+    for index, student in valid_df.iterrows():
         name = student['name']
         faculty = student.get('faculty', '')
         gender = student.get('gender', '') 
         benefit = student.get('benefit', '')
         global_rating = student['rating']
         status = student.get('status', '')   
-        priorities = student.get('priority_ratings', [])
         
         if status == 'denied':
             denied_students.append({
@@ -460,33 +462,117 @@ def allocate_dorms(df, capacities):
             })
             continue 
             
-        assigned = False
-        if isinstance(priorities, list) and len(priorities) > 0:
-            priorities = sorted(priorities, key=lambda x: x['priority'])
-            for p in priorities:
-                dorm = p.get('dorm')
-                if dorm in managers:
-                    student_info = {
-                        'ПІБ': name,
-                        'Стать': gender,
-                        'Факультет': faculty,
-                        'Балл': p.get('rating', global_rating),
-                        'Пріоритет': p['priority'],
-                        'Бонус': p.get('has_priority_bonus', student.get('has_priority_bonus', False)),
-                        'Пільга': benefit,
-                        'gender': gender
-                    }
-                    if managers[dorm].allocate(student_info):
-                        assigned = True
-                        break 
-                        
-        if not assigned:
-            unallocated.append({
-                'ПІБ': name, 'Стать': gender,
-                'Факультет': faculty, 'Балл': global_rating
-            })
+        priorities = student.get('priority_ratings', [])
+        if not isinstance(priorities, list):
+            priorities = []
             
-    return managers, unallocated, denied_students
+        priorities = sorted(priorities, key=lambda x: x['priority'])
+        
+        # Добавляем студента в очередь
+        unassigned_queue.append({
+            'id': index,
+            'name': name,
+            'faculty': faculty,
+            'gender': gender,
+            'benefit': benefit,
+            'global_rating': global_rating,
+            'has_bonus': student.get('has_priority_bonus', False),
+            'priorities': priorities,
+            'current_prio_idx': 0 # Начинаем с 0 (то есть с 1-го приоритета)
+        })
+        
+    # Словари для хранения "кандидатов", предварительно зачисленных в каждое общежитие
+    dorm_candidates = {dorm: [] for dorm in capacities.keys()}
+    unallocated_final = []
+    
+    # 2. Алгоритм Гейла-Шепли (Отложенное согласие)
+    while unassigned_queue:
+        s = unassigned_queue.pop(0) # Берем первого из очереди
+        
+        # Если у студента закончились приоритеты — он не прошел никуда
+        if s['current_prio_idx'] >= len(s['priorities']):
+            unallocated_final.append({
+                'ПІБ': s['name'], 'Стать': s['gender'],
+                'Факультет': s['faculty'], 'Балл': s['global_rating']
+            })
+            continue
+            
+        # Студент "стучится" в общежитие по своему текущему приоритету
+        prio = s['priorities'][s['current_prio_idx']]
+        dorm_id = prio.get('dorm')
+        
+        if dorm_id in dorm_candidates:
+            local_rating = prio.get('rating', s['global_rating'])
+            bonus = prio.get('has_priority_bonus', s['has_bonus'])
+            
+            candidate = {
+                'student': s,
+                'rating': local_rating,
+                'priority_num': prio['priority'],
+                'bonus': bonus
+            }
+            
+            # Добавляем его к списку претендентов на эту общагу
+            dorm_candidates[dorm_id].append(candidate)
+            
+            # --- ЧЕСТНАЯ СОРТИРОВКА ---
+            # Сортируем всех претендентов на это общежитие по ИХ ЛОКАЛЬНОМУ баллу (по убыванию)
+            dorm_candidates[dorm_id].sort(key=lambda x: x['rating'], reverse=True)
+            
+            # Создаем временный менеджер, чтобы проверить, кто влезет по лимитам гендера/унисекс
+            caps = capacities[dorm_id]
+            temp_manager = DormManager(dorm_id, caps['male'], caps['female'], caps['unisex'])
+            
+            accepted = []
+            for cand in dorm_candidates[dorm_id]:
+                stu = cand['student']
+                student_info = {
+                    'ПІБ': stu['name'],
+                    'Стать': stu['gender'],
+                    'Факультет': stu['faculty'],
+                    'Балл': cand['rating'],
+                    'Пріоритет': cand['priority_num'],
+                    'Бонус': cand['bonus'],
+                    'Пільга': stu['benefit'],
+                    'gender': stu['gender']
+                }
+                
+                if temp_manager.allocate(student_info):
+                    accepted.append(cand) # Места хватило, оставляем в общаге
+                else:
+                    # Места не хватило (вытеснили конкуренты с баллами выше)
+                    stu['current_prio_idx'] += 1 # Переходим к следующему приоритету
+                    unassigned_queue.append(stu) # Возвращаем студента обратно в очередь "неприкаянных"
+                    
+            # Оставляем в общежитии только тех, кто прошел жесткий отбор
+            dorm_candidates[dorm_id] = accepted
+            
+        else:
+            # Если общежития нет в словаре лимитов, сразу шлем на следующий приоритет
+            s['current_prio_idx'] += 1
+            unassigned_queue.append(s)
+
+    # 3. Финализируем результаты для записи в Excel
+    final_managers = {}
+    for dorm_id, caps in capacities.items():
+        manager = DormManager(dorm_id, caps['male'], caps['female'], caps['unisex'])
+        # Кандидаты уже отсортированы по убыванию локального балла, просто заливаем их в менеджер
+        for cand in dorm_candidates[dorm_id]:
+            stu = cand['student']
+            student_info = {
+                'ПІБ': stu['name'],
+                'Стать': stu['gender'],
+                'Факультет': stu['faculty'],
+                'Балл': cand['rating'],
+                'Пріоритет': cand['priority_num'],
+                'Бонус': cand['bonus'],
+                'Пільга': stu['benefit'],
+                'gender': stu['gender']
+            }
+            manager.allocate(student_info)
+        final_managers[dorm_id] = manager
+        
+    return final_managers, unallocated_final, denied_students
 
 if __name__ == "__main__":
     API_URL = "https://settlement.kpi.ua/api/public/ratings"
