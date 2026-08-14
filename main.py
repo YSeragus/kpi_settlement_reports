@@ -163,8 +163,11 @@ class ExcelReportGenerator:
                 all_settled.append(s_copy)
         df_all_settled = pd.DataFrame(all_settled)
 
+        # Вибираємо валідні дані без відмов та з наявним рейтингом
         valid_data = self.data[(self.data['status'] != 'denied') & self.data['rating'].notna()]
-        unique_students = valid_data.drop_duplicates(subset=['name'])
+        
+        # Видаляємо drop_duplicates, оскільки студенти можуть бути тезками
+        unique_students = valid_data
         
         # 1. Загальна інформація
         general_info = pd.DataFrame({
